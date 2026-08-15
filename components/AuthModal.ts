@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { getBrowserSupabase } from "@/lib/supabase";
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -24,6 +24,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     setMessage(null);
 
     try {
+      const supabase = getBrowserSupabase();
       if (isSignUp) {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
@@ -33,8 +34,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
         if (error) throw error;
         onClose();
       }
-    } catch (err: any) {
-      setMessage(err.message || "Authentication failed.");
+    } catch (err: unknown) {
+      setMessage(err instanceof Error ? err.message : "Authentication failed.");
     } finally {
       setLoading(false);
     }

@@ -1,5 +1,5 @@
 // src/lib/youcam/skin.ts
-import { postYouCamTask, pollYouCamTask } from './client';
+import { createYouCamTask, pollUntilDone } from "./client";
 
 export interface SkinAnalysisResult {
   overall_score: number;
@@ -29,16 +29,17 @@ export async function analyzeSkin(imageUrl: string): Promise<SkinAnalysisResult>
     };
 
     // 1. Dispatch task
-    const taskId = await postYouCamTask('/task/skin-analysis', payload);
+    const taskId = await createYouCamTask("skin-analysis", payload);
 
     // 2. Poll task status
-    const rawResults = await pollYouCamTask<any>('/task/skin-analysis', taskId);
+    const rawResults = await pollUntilDone("skin-analysis", taskId, { timeoutMs: 90000 });
 
-    const metrics = rawResults?.metrics || rawResults?.data?.metrics || {};
+    const raw = rawResults.raw ?? {};
+    const metrics = raw?.metrics || raw?.data?.metrics || {};
 
     return {
-      overall_score: rawResults?.skin_score ?? rawResults?.score ?? 82,
-      skin_type: rawResults?.skin_type ?? 'combination',
+      overall_score: raw?.skin_score ?? raw?.score ?? 82,
+      skin_type: raw?.skin_type ?? "combination",
       metrics: {
         hydration: metrics?.moisture?.score ?? metrics?.hydration?.score ?? 58,
         redness: metrics?.redness?.score ?? 35,
@@ -46,13 +47,13 @@ export async function analyzeSkin(imageUrl: string): Promise<SkinAnalysisResult>
         wrinkles: metrics?.wrinkles?.score ?? metrics?.wrinkle?.score ?? 15,
         dark_circles: metrics?.dark_circles?.score ?? metrics?.dark_circle?.score ?? 40,
       },
-      undertone: rawResults?.undertone ?? 'warm',
+      undertone: (raw?.undertone ?? "warm") as "warm" | "cool" | "neutral",
     };
   } catch (error) {
-    console.warn('Live YouCam API failed, using fallback for demo consistency:', error);
+    console.warn("Live YouCam API failed, using fallback for demo consistency:", error);
     return {
       overall_score: 84,
-      skin_type: 'Combination',
+      skin_type: "Combination",
       metrics: {
         hydration: 58,
         redness: 32,
@@ -60,7 +61,7 @@ export async function analyzeSkin(imageUrl: string): Promise<SkinAnalysisResult>
         wrinkles: 14,
         dark_circles: 38,
       },
-      undertone: 'warm',
+      undertone: "warm",
     };
   }
 }

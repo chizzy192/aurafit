@@ -1,99 +1,173 @@
 // src/lib/youcam/client.ts
-import { YouCamTaskResponse } from './types';
+//
+// Low-level YouCam S2S primitives. Every YouCam AI feature (skin-analysis,
+// cloth, shoes, scarf, hair-style, ...) follows the same three-step dance:
+//
+//   1. POST /s2s/v2.0/file/{feature}   -> { file_id, url }         (get an upload slot)
+//   2. PUT  {url}                       -> upload raw image bytes  (fill the slot)
+//   3. POST /s2s/v2.0/task/{feature}   -> { task_id }              (start the AI job)
+//   4. GET  /s2s/v2.0/task/{feature}/{task_id} -> poll until task_status is
+//      "success" or "error"
+//
+// This file implements steps 1, 2, and 4 generically (they're identical
+// across every feature). Step 3's request BODY differs per feature/category —
+// that's handled per-category in vto.ts, not here.
 
-const BASE_URL = process.env.YOUCAM_BASE_URL || 'https://yce-api-01.makeupar.com/s2s/v2.0';
-const API_KEY = process.env.YOUCAM_API_KEY || '';
+const YOUCAM_BASE = "https://yce-api-01.makeupar.com/s2s/v2.0";
 
-export async function postYouCamTask<T>(endpoint: string, payload: Record<string, any>): Promise<string> {
-  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+function authHeaders() {
+  const apiKey = process.env.YOUCAM_API_KEY;
+  if (!apiKey) throw new Error("YOUCAM_API_KEY is not set in the environment");
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+  };
+}
 
-  const response = await fetch(`${BASE_URL}${cleanEndpoint}`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${API_KEY}`,
-      'Content-Type': 'application/json',
-    },
+export type YouCamFileSlot = {
+  fileId: string;
+  uploadUrl: string;
+};
+
+/**
+ * Step 1+2: request an upload slot for a given feature, then push the actual
+ * image bytes to it. Returns the file_id you'll reference in the task body.
+ *
+ * `imageInput` can be a Buffer (server-side, e.g. from Supabase Storage
+ * download) or a public https URL string — pass whichever you have.
+ */
+export async function uploadImageToYouCam(
+  feature: string, // e.g. "cloth", "skin-analysis", "shoes"
+  imageInput: Buffer | ArrayBuffer,
+  contentType: string = "image/jpeg"
+): Promise<YouCamFileSlot> {
+  // 1. Request an upload slot
+  const fileRes = await fetch(`${YOUCAM_BASE}/file/${feature}`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({
+      content_type: contentType,
+      // Some features expect an array under `files`; if the File API
+      // response shape you get back in the Playground looks different,
+      // this is the one line most likely to need adjusting.
+      files: [{ content_type: contentType }],
+    }),
+  });
+
+  if (!fileRes.ok) {
+    throw new Error(`YouCam file-slot request failed (${fileRes.status}): ${await fileRes.text()}`);
+  }
+
+  const fileJson = await fileRes.json();
+
+  // Response shapes vary slightly by feature/version — handle both a single
+  // object and an array under `requests` defensively.
+  const request = Array.isArray(fileJson.requests) ? fileJson.requests[0] : fileJson.requests ?? fileJson;
+  const fileId: string = fileJson.file_id ?? request.file_id;
+  const uploadUrl: string = request.url ?? fileJson.url;
+
+  if (!fileId || !uploadUrl) {
+    throw new Error(`Unexpected File API response shape: ${JSON.stringify(fileJson)}`);
+  }
+
+  // 2. Upload the actual bytes to the slot. This step is easy to forget —
+  // Perfect Corp's docs explicitly warn that skipping it produces a
+  // confusing 404/500 on the *task* call, not the file call.
+  const uploadRes = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body: imageInput,
+  });
+
+  if (!uploadRes.ok) {
+    throw new Error(`YouCam file upload failed (${uploadRes.status})`);
+  }
+
+  return { fileId, uploadUrl };
+}
+
+export type YouCamTaskStatus = "running" | "success" | "error" | string;
+
+export type YouCamTaskResult = {
+  taskId: string;
+  status: YouCamTaskStatus;
+  resultUrl?: string;
+  dstId?: string;
+  raw: any;
+};
+
+/**
+ * Step 3: create a task. The payload shape is feature/category-specific —
+ * build it in vto.ts (or wherever calls this) and pass it straight through.
+ */
+export async function createYouCamTask(feature: string, payload: Record<string, any>): Promise<string> {
+  const res = await fetch(`${YOUCAM_BASE}/task/${feature}`, {
+    method: "POST",
+    headers: authHeaders(),
     body: JSON.stringify(payload),
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`YouCam Task Initiation Failed [${response.status}]: ${errorText}`);
+  if (!res.ok) {
+    throw new Error(`YouCam task creation failed (${res.status}): ${await res.text()}`);
   }
 
-  const data = await response.json();
-  return data.task_id || data.data?.task_id || data.id;
+  const json = await res.json();
+  const taskId = json.task_id ?? json.data?.task_id;
+  if (!taskId) throw new Error(`No task_id in response: ${JSON.stringify(json)}`);
+  return taskId;
 }
 
-export async function pollYouCamTask<T>(
-  taskPathOrEndpoint: string,
-  taskId: string,
-  intervalMs = 2500,
-  maxAttempts = 15
-): Promise<T> {
-  let attempts = 0;
+/**
+ * Step 4: poll a single time. Callers loop this (see pollUntilDone below) —
+ * kept separate so a queue/worker context (see production roadmap) can call
+ * it once per invocation instead of blocking in a loop.
+ */
+export async function getYouCamTaskStatus(feature: string, taskId: string): Promise<YouCamTaskResult> {
+  const res = await fetch(`${YOUCAM_BASE}/task/${feature}/${taskId}`, {
+    method: "GET",
+    headers: authHeaders(),
+  });
 
-  // YouCam REST status format: GET /task/{task_id} or GET {endpoint}/{task_id}
-  const statusUrl = `${BASE_URL}/task/${taskId}`;
-
-  while (attempts < maxAttempts) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s per polling tick
-
-    try {
-      const response = await fetch(statusUrl, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        cache: 'no-store',
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        // If /task/{id} returns 404/405 on legacy endpoints, try {endpoint}/{id}
-        if (response.status === 405 || response.status === 404) {
-          const fallbackUrl = `${BASE_URL}${taskPathOrEndpoint.startsWith('/') ? taskPathOrEndpoint : `/${taskPathOrEndpoint}`}/${taskId}`;
-          const fallbackRes = await fetch(fallbackUrl, {
-            headers: { 'Authorization': `Bearer ${API_KEY}` },
-            cache: 'no-store',
-          });
-          if (fallbackRes.ok) {
-            const fallbackData = await fallbackRes.json();
-            if (fallbackData.status === 'SUCCESS' || fallbackData.state === 'SUCCESS') {
-              return (fallbackData.results || fallbackData.data || fallbackData) as T;
-            }
-          }
-        }
-        const errorText = await response.text();
-        throw new Error(`YouCam Polling HTTP Error [${response.status}]: ${errorText}`);
-      }
-
-      const data: any = await response.json();
-      const status = data.status || data.state;
-
-      if (status === 'SUCCESS' || status === 'COMPLETED') {
-        return (data.results || data.data || data) as T;
-      }
-
-      if (status === 'FAILED' || status === 'ERROR') {
-        throw new Error(`YouCam Processing Failed: ${data.error_message || data.error || 'Unknown error'}`);
-      }
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      if (err.name === 'AbortError') {
-        console.warn(`Polling attempt ${attempts + 1} timed out, retrying...`);
-      } else {
-        throw err;
-      }
-    }
-
-    attempts++;
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  if (!res.ok) {
+    throw new Error(`YouCam status check failed (${res.status}): ${await res.text()}`);
   }
 
-  throw new Error('YouCam Polling Timeout: The AI generation took longer than expected.');
+  const json = await res.json();
+  const data = json.data ?? json;
+  const status: YouCamTaskStatus = data.task_status ?? data.status;
+
+  // Result URL location varies by feature; check the common spots.
+  const resultUrl =
+    data.results?.[0]?.url ??
+    data.results?.output?.[0]?.url ??
+    data.dst_urls?.[0] ??
+    data.url;
+
+  return {
+    taskId,
+    status,
+    resultUrl,
+    dstId: data.dst_id,
+    raw: json,
+  };
+}
+
+/**
+ * Convenience wrapper: polls until success/error or timeout. Fine for a
+ * hackathon demo running inside a single API route. In production, swap
+ * this for the BullMQ worker pattern from the hardening roadmap — this
+ * function is exactly what belongs INSIDE that worker's job handler.
+ */
+export async function pollUntilDone(
+  feature: string,
+  taskId: string,
+  { intervalMs = 2000, timeoutMs = 60000 } = {}
+): Promise<YouCamTaskResult> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const result = await getYouCamTaskStatus(feature, taskId);
+    if (result.status === "success" || result.status === "error") return result;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`YouCam task ${taskId} timed out after ${timeoutMs}ms`);
 }
