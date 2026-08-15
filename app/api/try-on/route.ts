@@ -1,9 +1,10 @@
+// src/app/api/try-on/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { generateVirtualTryOn } from '@/lib/youcam/vto';
 
 export async function POST(req: NextRequest) {
   try {
-    const { userImageUrl, garmentImageUrl, category } = await req.json();
+    const { userImageUrl, garmentImageUrl, garmentCategory } = await req.json();
 
     if (!userImageUrl || !garmentImageUrl) {
       return NextResponse.json(
@@ -15,7 +16,7 @@ export async function POST(req: NextRequest) {
     const resultImageUrl = await generateVirtualTryOn(
       userImageUrl,
       garmentImageUrl,
-      category || 'dresses'
+      garmentCategory || 'full_body'
     );
 
     return NextResponse.json({
@@ -23,7 +24,7 @@ export async function POST(req: NextRequest) {
       resultImageUrl,
     });
   } catch (error: any) {
-    console.error('Apparel VTO Error:', error);
+    console.error('Apparel VTO Route Error:', error);
     return NextResponse.json(
       { error: error.message || 'Failed to process virtual try-on.' },
       { status: 500 }

@@ -1,3 +1,4 @@
+// src/app/api/event-plan/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { analyzeSkin } from '@/lib/youcam/skin';
 import { getEventWeather } from '@/lib/weather';
@@ -5,29 +6,32 @@ import { generateEventPlan } from '@/lib/engine';
 
 export async function POST(req: NextRequest) {
   try {
-    const { userImageUrl, latitude, longitude, eventType } = await req.json();
+    const { userImageUrl, latitude, longitude, eventType, cityName } = await req.json();
 
     if (!userImageUrl) {
-      return NextResponse.json({ error: 'User portrait image URL is required' }, { status: 400 });
+      return NextResponse.json({ error: 'User portrait is required' }, { status: 400 });
     }
 
-    // Parallel processing: Call YouCam Skin AI and Weather Service concurrently
+    // Run YouCam Skin AI & Weather API concurrently
     const [skinResults, envResults] = await Promise.all([
       analyzeSkin(userImageUrl),
-      getEventWeather(latitude || 25.7617, longitude || -80.1918), // Default: Miami
+      getEventWeather(latitude || 6.5244, longitude || 3.3792), // Default: Lagos, Nigeria
     ]);
 
-    // Generate routine & recommendations
-    const plan = generateEventPlan(skinResults, envResults, eventType || 'Special Event');
+    // Build personalized protocol
+    const plan = generateEventPlan(skinResults, envResults, eventType || 'Owambe Wedding');
 
     return NextResponse.json({
       success: true,
       skinResults,
-      envResults,
+      envResults: {
+        ...envResults,
+        cityName: cityName || 'Lagos, Nigeria',
+      },
       plan,
     });
   } catch (error: any) {
-    console.error('Event Plan Generation Error:', error);
-    return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
+    console.error('Event Plan Error:', error);
+    return NextResponse.json({ error: error.message || 'Server Error' }, { status: 500 });
   }
 }

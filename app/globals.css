@@ -15,6 +15,23 @@
   --font-mono: var(--font-geist-mono);
 }
 
+@theme {
+  /* AuraFit Luxury Color Continuum: Light Pink -> Rose Brown -> Dark Espresso Brown */
+  --color-brand-blush: #FDF2F0;       /* Ultra-light Pink Base */
+  --color-brand-pink: #F5D3CE;        /* Soft Blush Pink Accent */
+  --color-brand-rose: #C68B7B;        /* Warm Rose Brown (Neutral CTA) */
+  --color-brand-terracotta: #A85A48;  /* Vibrant Terracotta (Rich Tones) */
+  --color-brand-mocha: #633B31;       /* Deep Mocha Brown */
+  --color-brand-espresso: #2D1812;    /* Dark Rich Espresso (High-Contrast Text/Borders) */
+  --color-brand-surface: #FFFFFF;
+}
+
+/* Ensure contrast persists across browsers */
+body {
+  background-color: var(--color-brand-blush);
+  color: var(--color-brand-espresso);
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
